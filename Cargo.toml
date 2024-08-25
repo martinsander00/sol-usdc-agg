@@ -1,0 +1,12 @@
+[package]
+name = "sol-usdc-agg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+solana-client = "1.17.22"
+solana-program = "1.17.22"
+borsh = { version = "0.9.3", package = "borsh" }
+uint = { version = "0.9.5", default-features = false }
+arrayref = "0.3.8"
+bytemuck = { version = "1.16.3", features = ["derive", "min_const_generics"] }
