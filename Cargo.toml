@@ -8,5 +8,6 @@ solana-client = "1.17.22"
 solana-program = "1.17.22"
 borsh = { version = "0.9.3", package = "borsh" }
 uint = { version = "0.9.5", default-features = false }
+termion = "1.5"
 arrayref = "0.3.8"
 bytemuck = { version = "1.16.3", features = ["derive", "min_const_generics"] }

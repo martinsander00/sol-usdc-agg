@@ -1,64 +1,87 @@
+use std::time::Instant;
 use solana_client::rpc_client::RpcClient;
 use solana_program::pubkey::Pubkey;
-use std::{thread, time::Duration, str::FromStr, io::{self, Write, Error as IoError, ErrorKind}};
+use std::{thread, time::Duration, str::FromStr, io::{self, Read}};
 use borsh::{BorshDeserialize, BorshSerialize};
-
-// Define U256 using the uint crate
+use termion::{clear, cursor, color};
+use std::io::Write;
+use std::collections::HashMap;
+// Define U128 using the uint crate
 uint::construct_uint! {
-    pub struct U256(4);
+    pub struct U128(2);
 }
 
-// Custom to_le_bytes implementation for U256
-impl U256 {
-    pub fn to_le_bytes(&self) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        for (index, word) in self.0.iter().enumerate() {
-            bytes[index * 8..(index + 1) * 8].copy_from_slice(&word.to_le_bytes());
-        }
+// Implement to_le_bytes and from_le_bytes for U128
+impl U128 {
+    fn to_le_bytes(&self) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        self.to_little_endian(&mut bytes);
         bytes
+    }
+
+    fn from_le_bytes(bytes: [u8; 16]) -> Self {
+        U128::from_little_endian(&bytes)
     }
 }
 
-// Manually implement BorshDeserialize and BorshSerialize for U256
-impl BorshSerialize for U256 {
-    fn serialize<W: Write>(&self, writer: &mut W) -> Result<(), IoError> {
+// Implement BorshSerialize and BorshDeserialize for U128
+impl BorshSerialize for U128 {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let bytes = self.to_le_bytes();
         writer.write_all(&bytes)
     }
 }
 
-impl BorshDeserialize for U256 {
-    fn deserialize(buf: &mut &[u8]) -> Result<Self, IoError> {
-        const SIZE: usize = 32; // U256 expected size in bytes
-        if buf.len() < SIZE {
-            return Err(IoError::new(ErrorKind::Other, "Buffer too short to deserialize U256"));
-        }
-        let mut array = [0u8; SIZE];
-        array.copy_from_slice(&buf[0..SIZE]);
-        *buf = &buf[SIZE..]; // Move the slice forward
-        Ok(U256::from_little_endian(&array))
+impl BorshDeserialize for U128 {
+    fn deserialize(buf: &mut &[u8]) -> io::Result<Self> {
+        let mut bytes = [0u8; 16];
+        buf.read_exact(&mut bytes)?;
+        Ok(U128::from_le_bytes(bytes))
     }
 }
 
+#[derive(Debug, BorshDeserialize, BorshSerialize, Default, Clone, Copy)]
+struct WhirlpoolRewardInfo {
+    mint: Pubkey,
+    vault: Pubkey,
+    authority: Pubkey,
+    emissions_per_second_x64: U128,
+    growth_global_x64: U128,
+}
 
 #[derive(Debug, BorshDeserialize, BorshSerialize)]
-struct PoolState {
-    token_a_balance: U256,
-    token_b_balance: U256,
+struct Whirlpool {
+    whirlpools_config: Pubkey,
+    whirlpool_bump: [u8; 1],
+    tick_spacing: u16,
+    tick_spacing_seed: [u8; 2],
+    fee_rate: u16,
+    protocol_fee_rate: u16,
+    liquidity: U128,
+    sqrt_price: U128,
+    tick_current_index: i32,
+    protocol_fee_owed_a: u64,
+    protocol_fee_owed_b: u64,
+    token_mint_a: Pubkey,
+    token_vault_a: Pubkey,
+    fee_growth_global_a: U128,
+    token_mint_b: Pubkey,
+    token_vault_b: Pubkey,
+    fee_growth_global_b: U128,
+    reward_last_updated_timestamp: u64,
+    reward_infos: [WhirlpoolRewardInfo; 3],
 }
 
-fn deserialize_pool_state(data: &[u8]) -> Result<PoolState, IoError> {
-    println!("Attempting to deserialize data of length: {}", data.len());
-    PoolState::try_from_slice(data)
+fn deserialize_whirlpool(data: &[u8]) -> Result<Whirlpool, io::Error> {
+    let mut data = &data[8..]; // Skip the 8-byte discriminator
+    Whirlpool::deserialize(&mut data)
 }
-
 
 fn main() {
     let rpc_url = String::from("https://api.mainnet-beta.solana.com");
     let client = RpcClient::new(rpc_url);
 
-    
-        let pool_addresses = vec![
+    let pool_addresses = vec![
         "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
         "FpCMFDFGYotvufJ7HrFHsWEiiQCGbkLCtwHiDnh7o28Q",
         "7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm",
@@ -71,21 +94,66 @@ fn main() {
         "CWjGo5jkduSW5LN5rxgiQ18vGnJJEKWPCXkpJGxKSQTH"
     ];
 
+    // HashMap to store the previous prices
+    let mut last_prices: HashMap<String, f64> = HashMap::new();
+    let mut first_iteration = true;
+
     loop {
+        if first_iteration {
+            // Clear the terminal screen on the first iteration
+            print!("{}", clear::All);
+            print!("{}", cursor::Goto(1, 1));
+            first_iteration = false;
+        }
+
+        let mut updated = false;
+
         for address in &pool_addresses {
             let pool_pubkey = Pubkey::from_str(address).unwrap();
             match client.get_account_data(&pool_pubkey) {
                 Ok(data) => {
-                    match deserialize_pool_state(&data) {
-                        Ok(pool_state) => println!("Data for Pool {}: {:?}", address, pool_state),
-                        Err(e) => println!("Error processing data for {}: {:?}", address, e),
+                    match deserialize_whirlpool(&data) {
+                        Ok(whirlpool) => {
+                            let sqrt_price = whirlpool.sqrt_price.as_u128();
+
+                            // Convert sqrt_price from Q64.64 format to f64
+                            let sqrt_price_f64 = (sqrt_price as f64) / (1u128 << 64) as f64;
+
+                            // Square the sqrt_price to get the actual price
+                            let price = sqrt_price_f64 * sqrt_price_f64;
+
+                            // Adjust price by moving the decimal 3 places to the right
+                            let adjusted_price = price * 1000.0;
+
+                            // Check if the price has changed
+                            let address_str = format!("{}...{}", &address[0..5], &address[address.len()-5..]);
+                            if last_prices.get(&address_str) != Some(&adjusted_price) {
+                                // Print only the first and last 5 characters of the address and the price
+                                print!(
+                                    "{}{} - ${:.6}\n",
+                                    cursor::Goto(1, pool_addresses.iter().position(|x| x == address).unwrap() as u16 + 1),
+                                    address_str,
+                                    adjusted_price
+                                );
+
+                                // Update the HashMap with the new price
+                                last_prices.insert(address_str, adjusted_price);
+                                updated = true;
+                            }
+                        },
+                        Err(e) => println!("{} - Error processing data: {:?}", address, e),
                     }
                 },
-                Err(e) => println!("Failed to fetch data for {}: {:?}", address, e),
+                Err(e) => println!("{} - Failed to fetch data: {:?}", address, e),
             }
         }
 
-        thread::sleep(Duration::from_secs(10)); // Adjust the frequency as necessary
+        if updated {
+            // Force flush the output to ensure it updates in the terminal
+            io::stdout().flush().unwrap();
+        }
+
+        // Sleep before the next iteration
+        thread::sleep(Duration::from_secs(2));
     }
 }
-
