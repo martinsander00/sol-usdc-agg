@@ -1,6 +1,6 @@
 # Solana Whirlpool Price Monitor
 
-A Rust application that monitors and displays real-time prices of specified Solana Whirlpool pools in the terminal.$  
+A Rust application that monitors and displays real-time prices of specified Solana Whirlpool pools in the terminal.
 
 ## Features
 
